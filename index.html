@@ -155,9 +155,9 @@ details pre { white-space: pre-wrap; word-break: break-word; max-height: 160px; 
       <button class="primary grow" id="analyzeBtn">Cari momen</button>
       <button class="small" id="addBtn" title="Tambah klip dari posisi video sekarang">+ Klip manual</button>
     </div>
-    <p class="hint">Momen dicari dari bagian yang suaranya paling ramai dan naik turun (tawa, teriak, obrolan seru). Ini bukan AI yang memahami isi video, jadi cek tiap klip sebelum ekspor.</p>
+    <p class="hint">Momen dicari dari bagian yang suaranya paling ramai dan naik turun (tawa, teriak, obrolan seru). Video tanpa suara, misalnya rekaman layar, dicari dari gerakan layar. Ini bukan AI yang memahami isi video, jadi cek tiap klip sebelum ekspor.</p>
     <div class="wave-wrap" id="waveWrap" hidden>
-      <canvas id="wave" aria-label="Grafik keras suara sepanjang video. Ketuk untuk loncat ke bagian itu."></canvas>
+      <canvas id="wave" aria-label="Grafik keras suara atau gerakan layar sepanjang video. Ketuk untuk loncat ke bagian itu."></canvas>
     </div>
   </section>
 
@@ -219,7 +219,7 @@ const URLS = {
 };
 const SR = 4000; // sample rate analisis suara
 
-const state = { levelsOffset: 0, file: null, inputFile: null, duration: 0, levels: null, clips: [], nextId: 1, busy: false, cancelled: false };
+const state = { sawAudio: false, mode: 'audio', levelsOffset: 0, file: null, inputFile: null, duration: 0, levels: null, clips: [], nextId: 1, busy: false, cancelled: false };
 let ff = null, engineReady = false, mounted = false, onTime = null, wakeLock = null;
 const logLines = [];
 let outCount = 0;
@@ -304,6 +304,10 @@ function progressLine(label, done, total, t0) {
   if (total > 0 && done / total > 0.03) txt += ' · sisa sekitar ' + fmtLong(el * (total - done) / done);
   return txt;
 }
+function lastError() {
+  const l = logLines.slice().reverse().find((x) => /error|invalid|failed|no such|unsupported|cannot|unable|not found/i.test(x));
+  return String(l || logLines[logLines.length - 1] || 'penyebab tidak diketahui').trim().slice(0, 160);
+}
 function fmtLong(sec) {
   sec = Math.round(sec);
   if (sec < 60) return sec + ' dtk';
@@ -337,6 +341,7 @@ async function ensureEngine(stage) {
   ff = new FFmpeg();
   ff.on('log', ({ message }) => {
     logLines.push(message); if (logLines.length > 60) logLines.shift();
+    if (/Stream #\d+:\d+.*: Audio:/.test(message)) state.sawAudio = true;
     if (!state.duration) {
       const m = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(message);
       if (m) state.duration = (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]);
@@ -423,7 +428,7 @@ $('#player').addEventListener('error', () => {
 /* ---------- analisis suara ---------- */
 async function analyze() {
   if (!state.file || state.busy) return;
-  state.cancelled = false; logLines.length = 0;
+  state.cancelled = false; logLines.length = 0; state.sawAudio = false; state.mode = 'audio';
   await setBusy(true);
   try {
     await ensureEngine('Langkah 1 dari 3');
@@ -444,24 +449,66 @@ async function analyze() {
     args.push('-i', inPath());
     if (rangeLen > 0) args.push('-t', String(rangeLen));
     args.push('-vn', '-ac', '1', '-ar', String(SR), '-f', 's16le', '-y', 'audio.raw');
+    let levels, secs;
     try {
       await run(args);
     } catch (e) {
       if (state.cancelled) throw e;
-      throw new Error('Tidak bisa membaca suara. Mungkin video ini tidak punya suara. Kamu masih bisa tambah klip manual.');
+      if (state.sawAudio) throw new Error('Gagal membaca suara dari video ini. Detail: ' + lastError());
+      state.mode = 'motion';
     }
-    onTime = null;
-    setStatus('Langkah 3 dari 3 · Menghitung momen…', null);
-    const raw = await ff.readFile('audio.raw');
-    try { await ff.deleteFile('audio.raw'); } catch (e) {}
-    const samples = new Int16Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength - (raw.byteLength % 2)));
-    const secs = Math.floor(samples.length / SR);
-    if (secs < 3) throw new Error('Suara terlalu pendek untuk dianalisis.');
-    const levels = new Float32Array(secs);
-    for (let i = 0; i < secs; i++) {
-      let sum = 0; const o = i * SR;
-      for (let j = 0; j < SR; j++) { const v = samples[o + j] / 32768; sum += v * v; }
-      levels[i] = Math.max(-80, 20 * Math.log10(Math.sqrt(sum / SR) + 1e-5));
+    if (state.mode === 'audio') {
+      onTime = null;
+      setStatus('Langkah 3 dari 3 · Menghitung momen…', null);
+      const raw = await ff.readFile('audio.raw');
+      try { await ff.deleteFile('audio.raw'); } catch (e) {}
+      const samples = new Int16Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength - (raw.byteLength % 2)));
+      secs = Math.floor(samples.length / SR);
+      if (secs < 3) throw new Error('Suara terlalu pendek untuk dianalisis.');
+      levels = new Float32Array(secs);
+      for (let i = 0; i < secs; i++) {
+        let sum = 0; const o = i * SR;
+        for (let j = 0; j < SR; j++) { const v = samples[o + j] / 32768; sum += v * v; }
+        levels[i] = Math.max(-80, 20 * Math.log10(Math.sqrt(sum / SR) + 1e-5));
+      }
+    } else {
+      // video tanpa suara (misalnya rekaman layar): cari momen dari seberapa banyak layar bergerak
+      const t1 = Date.now();
+      setStatus('Langkah 2 dari 3 · Video ini tanpa suara, membaca gerakan layar…', null);
+      onTime = (t) => {
+        const left = state.duration ? Math.max(1, state.duration - from) : 0;
+        const total = rangeLen > 0 ? (left ? Math.min(rangeLen, left) : rangeLen) : left;
+        setStatus(progressLine('Langkah 2 dari 3 · Membaca gerakan layar ' + fmt(from + t) + (state.duration ? ' dari ' + fmt(state.duration) : ''), t, total, t1), total ? t / total : null);
+      };
+      try { await ff.deleteFile('motion.raw'); } catch (e) {}
+      const margs = [];
+      if (from > 0) margs.push('-ss', String(from));
+      margs.push('-i', inPath());
+      if (rangeLen > 0) margs.push('-t', String(rangeLen));
+      margs.push('-an', '-vf', 'fps=2,scale=48:48,format=gray', '-f', 'rawvideo', '-y', 'motion.raw');
+      try { await run(margs); } catch (e) {
+        if (state.cancelled) throw e;
+        throw new Error('Tidak bisa membaca gambar dari video ini. Detail: ' + lastError());
+      }
+      onTime = null;
+      setStatus('Langkah 3 dari 3 · Menghitung momen…', null);
+      const mr = await ff.readFile('motion.raw');
+      try { await ff.deleteFile('motion.raw'); } catch (e) {}
+      const FR = 48 * 48, nf = Math.floor(mr.length / FR);
+      secs = Math.floor(nf / 2);
+      if (secs < 3) throw new Error('Video terlalu pendek untuk dianalisis.');
+      levels = new Float32Array(secs);
+      for (let i = 0; i < secs; i++) {
+        let sum = 0, cnt = 0;
+        for (let k = 2 * i; k < 2 * i + 2; k++) {
+          if (k === 0) continue;
+          let d = 0; const a0 = k * FR, b0 = (k - 1) * FR;
+          for (let j = 0; j < FR; j++) d += Math.abs(mr[a0 + j] - mr[b0 + j]);
+          sum += d / FR; cnt++;
+        }
+        const diff = cnt ? sum / cnt : 0;
+        levels[i] = Math.max(-80, 20 * Math.log10(diff / 255 + 1e-3));
+      }
     }
     state.levels = levels; state.levelsOffset = from;
     state.duration = Math.max(state.duration, from + secs);
@@ -472,8 +519,9 @@ async function analyze() {
     state.clips = found.clips.concat(keep).sort((a, b) => a.start - b.start);
     $('#waveWrap').hidden = false;
     renderClips(); drawWave();
-    if (found.flat) setStatus('Suara di video ini hampir rata, jadi momen dibagi rata. Cek manual ya.', 1);
-    else setStatus('Selesai. Ketemu ' + found.clips.length + ' momen.', 1);
+    const via = state.mode === 'motion' ? ' (dari gerakan layar, karena video ini tanpa suara)' : '';
+    if (found.flat) setStatus('Video ini hampir rata, jadi momen dibagi rata. Cek manual ya.' + via, 1);
+    else setStatus('Selesai. Ketemu ' + found.clips.length + ' momen' + via + '.', 1);
   } catch (e) {
     if (state.cancelled) { hideStatus(); }
     else showError(e.message || String(e));
