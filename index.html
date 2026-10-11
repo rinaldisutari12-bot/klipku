@@ -219,7 +219,7 @@ const URLS = {
 };
 const SR = 4000; // sample rate analisis suara
 
-const state = { sawAudio: false, mode: 'audio', levelsOffset: 0, file: null, inputFile: null, duration: 0, levels: null, clips: [], nextId: 1, busy: false, cancelled: false };
+const state = { ext: '.mp4', stable: false, sawAudio: false, mode: 'audio', levelsOffset: 0, file: null, inputFile: null, duration: 0, levels: null, clips: [], nextId: 1, busy: false, cancelled: false };
 let ff = null, engineReady = false, mounted = false, onTime = null, wakeLock = null;
 const logLines = [];
 let outCount = 0;
@@ -384,7 +384,9 @@ async function ensureEngine(stage) {
   engineReady = true; mounted = false;
 }
 async function mountInput() {
-  if (mounted) { try { await ff.unmount('/in'); } catch (e) {} mounted = false; }
+  // selalu lepas pasangan lama dulu (file lama atau pilih ulang), kalau belum ada pasangan errornya diabaikan
+  try { await ff.unmount('/in'); } catch (e) {}
+  mounted = false;
   await ff.mount('WORKERFS', { files: [state.inputFile] }, '/in');
   mounted = true;
 }
@@ -400,23 +402,71 @@ function cancelWork() {
 }
 
 /* ---------- pilih file ---------- */
-$('#file').addEventListener('change', (ev) => {
+$('#file').addEventListener('click', (ev) => { ev.target.value = ''; }); // agar file yang sama bisa dipilih ulang
+$('#file').addEventListener('change', async (ev) => {
   const f = ev.target.files && ev.target.files[0];
   if (!f) return;
+  const same = !!state.file && state.file.name === f.name && state.file.size === f.size;
   state.file = f;
   const ext = (f.name.match(/\.[a-z0-9]{2,4}$/i) || ['.mp4'])[0].toLowerCase();
+  state.ext = ext;
   state.inputFile = new File([f], 'input' + ext, { type: f.type });
-  state.duration = 0; state.levels = null; state.levelsOffset = 0; state.clips = []; state.nextId = 1;
+  if (!same) { state.duration = 0; state.levels = null; state.levelsOffset = 0; state.clips = []; state.nextId = 1; }
   mounted = false; // file baru wajib di-mount ulang
   const p = $('#player');
   if (p.dataset.url) URL.revokeObjectURL(p.dataset.url);
   const url = URL.createObjectURL(f);
   p.dataset.url = url; p.src = url; p.hidden = false;
-  $('#fileInfo').textContent = f.name + ' · ' + fmtSize(f.size);
+  $('#fileInfo').textContent = f.name + ' · ' + fmtSize(f.size) + (same ? ' · dipilih ulang, klip kamu tetap tersimpan' : '');
   $('#s-find').hidden = false;
-  $('#waveWrap').hidden = true;
+  if (!same) $('#waveWrap').hidden = true;
   hideStatus(); renderClips(); drawWave();
+  await stabilizeInput(f, same);
 });
+/* Android bisa mencabut izin baca file setelah beberapa saat. Salinan di penyimpanan browser tidak kena masalah itu. */
+const COPY_LIMIT = 1.2e9;
+async function stabilizeInput(f, same) {
+  if (f.size > COPY_LIMIT || !(navigator.storage && navigator.storage.getDirectory)) return;
+  await setBusy(true);
+  try {
+    setStatus('Menyalin video ke penyimpanan browser supaya izin file tidak hilang… 0%', 0);
+    const root = await navigator.storage.getDirectory();
+    try { await root.removeEntry('klipku-input'); } catch (e) {}
+    const fh = await root.getFileHandle('klipku-input', { create: true });
+    const w = await fh.createWritable();
+    let copied = 0, last = 0;
+    const ts = new TransformStream({
+      transform(chunk, ctl) {
+        copied += chunk.length; ctl.enqueue(chunk);
+        const now = Date.now();
+        if (now - last > 200) { last = now; setStatus('Menyalin video ke penyimpanan browser… ' + mb(copied) + ' dari ' + mb(f.size) + ' MB', copied / f.size); }
+      }
+    });
+    await f.stream().pipeThrough(ts).pipeTo(w);
+    const stable = await fh.getFile();
+    if (state.file === f) { state.inputFile = new File([stable], 'input' + state.ext, { type: f.type }); mounted = false; state.stable = true; }
+    hideStatus();
+  } catch (e) {
+    state.stable = false;
+    hideStatus(); // gagal menyalin: tetap pakai file asli
+  } finally {
+    await setBusy(false);
+  }
+}
+async function checkReadable() {
+  try {
+    const f = state.inputFile; const n = Math.min(f.size, 65536);
+    await f.slice(0, n).arrayBuffer();
+    await f.slice(Math.max(0, f.size - 65536)).arrayBuffer();
+    return true;
+  } catch (e) { return false; }
+}
+const NOT_READABLE = 'HP tidak lagi mengizinkan browser membaca file video ini. Ini sering terjadi di Android kalau file berubah atau pindah, atau halaman lama didiamkan. Tekan "Pilih video dari HP" dan pilih video yang sama lagi. Klip yang sudah kamu atur tetap tersimpan, lalu ekspor lagi.';
+function explain(e) {
+  const m = (e && e.message) || String(e);
+  if (/NotReadable|could not be read|NOT_READABLE/i.test(m)) return NOT_READABLE;
+  return m;
+}
 $('#player').addEventListener('loadedmetadata', () => {
   const d = $('#player').duration;
   if (isFinite(d) && d > 0) { state.duration = d; renderClips(); drawWave(); }
@@ -431,6 +481,7 @@ async function analyze() {
   state.cancelled = false; logLines.length = 0; state.sawAudio = false; state.mode = 'audio';
   await setBusy(true);
   try {
+    if (!(await checkReadable())) throw new Error('NOT_READABLE');
     await ensureEngine('Langkah 1 dari 3');
     setStatus('Langkah 2 dari 3 · Membuka file video…', null);
     await mountInput();
@@ -524,7 +575,7 @@ async function analyze() {
     else setStatus('Selesai. Ketemu ' + found.clips.length + ' momen' + via + '.', 1);
   } catch (e) {
     if (state.cancelled) { hideStatus(); }
-    else showError(e.message || String(e));
+    else showError(explain(e));
   } finally {
     onTime = null; await setBusy(false);
     if (!state.cancelled) $('#cancelBtn').hidden = true;
@@ -689,6 +740,7 @@ async function exportAll() {
   state.cancelled = false; logLines.length = 0;
   await setBusy(true);
   try {
+    if (!(await checkReadable())) throw new Error('NOT_READABLE');
     await ensureEngine('Langkah 1 dari 2');
     setStatus('Langkah 2 dari 2 · Membuka file video…', null);
     await mountInput();
@@ -715,7 +767,7 @@ async function exportAll() {
     $('#s-out').scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (e) {
     if (state.cancelled) hideStatus();
-    else showError((e.message || String(e)) + ' Kalau HP kehabisan memori, tutup aplikasi lain atau coba kualitas Cepat.');
+    else { const m = explain(e); showError(m === NOT_READABLE ? m : m + ' Kalau HP kehabisan memori, tutup aplikasi lain atau coba kualitas Cepat.'); }
   } finally {
     onTime = null; await setBusy(false);
   }
