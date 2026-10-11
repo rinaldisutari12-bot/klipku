@@ -91,6 +91,8 @@ canvas#wave { width: 100%; height: 96px; display: block; border-radius: 10px; ba
 .stepper { display: flex; align-items: center; gap: 6px; }
 .stepper span.lbl { font-size: 12px; color: var(--muted); width: 44px; }
 .stepper .t { min-width: 58px; text-align: center; font-weight: 600; }
+.t-in { width: 104px; min-height: 36px; text-align: center; font: 700 16px var(--mono); font-variant-numeric: tabular-nums; border-radius: 10px; border: 1px solid var(--line); background: var(--surface-2); color: var(--text); padding: 0 6px; }
+.t-in.bad { border-color: var(--bad); }
 .chk { width: 22px; height: 22px; accent-color: var(--accent); }
 .out { display: flex; flex-direction: column; gap: 8px; }
 .out video { max-height: 52vh; }
@@ -629,12 +631,12 @@ function renderClips() {
       </div>
       <div class="stepper"><span class="lbl">Mulai</span>
         <button class="small" data-act="s-" aria-label="Mulai mundur 1 detik">−1</button>
-        <span class="t mono">${fmt(c.start)}</span>
+        <input class="t-in" data-time="start" inputmode="decimal" autocomplete="off" value="${fmt(c.start)}" aria-label="Waktu mulai klip ${i + 1}">
         <button class="small" data-act="s+" aria-label="Mulai maju 1 detik">+1</button>
       </div>
       <div class="stepper"><span class="lbl">Akhir</span>
         <button class="small" data-act="e-" aria-label="Akhir mundur 1 detik">−1</button>
-        <span class="t mono">${fmt(c.end)}</span>
+        <input class="t-in" data-time="end" inputmode="decimal" autocomplete="off" value="${fmt(c.end)}" aria-label="Waktu akhir klip ${i + 1}">
         <button class="small" data-act="e+" aria-label="Akhir maju 1 detik">+1</button>
       </div>
       <div class="row">
@@ -655,6 +657,36 @@ $('#clipList').addEventListener('click', (ev) => {
   if (act === 'del') state.clips = state.clips.filter((x) => x !== c);
   if (act === 'play') { playRange(c.start, c.end); return; }
   renderClips(); drawWave();
+});
+function parseTime(str) {
+  const parts = String(str).trim().split(/[:.,\s]+/).filter((x) => x !== '');
+  if (!parts.length || parts.length > 3 || parts.some((x) => !/^\d+$/.test(x))) return NaN;
+  const n = parts.map((x) => parseInt(x, 10));
+  if (n.length === 1) return n[0];
+  if (n.length === 2) return n[1] < 60 ? n[0] * 60 + n[1] : NaN;
+  return n[1] < 60 && n[2] < 60 ? n[0] * 3600 + n[1] * 60 + n[2] : NaN;
+}
+$('#clipList').addEventListener('focusin', (ev) => { if (ev.target.matches('.t-in')) setTimeout(() => ev.target.select(), 0); });
+$('#clipList').addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && ev.target.matches('.t-in')) ev.target.blur(); });
+$('#clipList').addEventListener('change', (ev) => {
+  const inp = ev.target.closest('.t-in'); if (!inp) return;
+  const card = inp.closest('.clip'); const c = state.clips.find((x) => x.id === +card.dataset.id); if (!c) return;
+  const D = state.duration || 1e9, kind = inp.dataset.time, v = parseTime(inp.value);
+  let ok = Number.isFinite(v) && v >= 0;
+  if (ok && kind === 'start') {
+    const len = c.end - c.start; let s0 = Math.min(v, D - 3), e0 = c.end;
+    if (s0 > e0 - 3) e0 = Math.min(D, s0 + len);   // geser seluruh klip, panjangnya tetap
+    if (e0 - s0 < 3) s0 = e0 - 3;
+    c.start = Math.max(0, s0); c.end = e0;
+  } else if (ok && kind === 'end') {
+    const e0 = Math.min(v, D);
+    if (e0 < c.start + 3) ok = false; else c.end = e0;
+  }
+  renderClips(); drawWave();
+  if (!ok) {
+    const again = document.querySelector('.clip[data-id="' + c.id + '"] [data-time="' + kind + '"]');
+    if (again) { again.classList.add('bad'); setTimeout(() => again.classList.remove('bad'), 1800); }
+  }
 });
 $('#addBtn').addEventListener('click', () => {
   const p = $('#player'); const t = Math.floor(p.currentTime || 0);
