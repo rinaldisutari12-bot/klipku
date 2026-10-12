@@ -99,6 +99,18 @@ canvas#wave { width: 100%; height: 96px; display: block; border-radius: 10px; ba
 .err { color: var(--bad); font-size: 14px; }
 details { font-size: 12px; color: var(--muted); }
 details pre { white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow: auto; margin: 6px 0 0; font-family: var(--mono); }
+details.card { font-size: 15px; color: var(--text); }
+details.card > summary { font: 600 13px/1.2 var(--body); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); cursor: pointer; min-height: 24px; display: flex; align-items: center; gap: 8px; }
+details.card > summary small { text-transform: none; letter-spacing: 0; font-weight: 400; }
+details.card[open] > summary { margin-bottom: 12px; }
+.body { display: flex; flex-direction: column; gap: 12px; }
+textarea { width: 100%; min-height: 96px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface-2); color: var(--text); font: 15px/1.4 var(--mono); padding: 10px; resize: vertical; }
+input[type="url"] { min-height: 44px; width: 100%; border-radius: 10px; border: 1px solid var(--line); background: var(--surface-2); color: var(--text); font: 15px var(--body); padding: 0 10px; }
+.ytwrap { aspect-ratio: 16 / 9; width: 100%; background: #000; border-radius: 10px; overflow: hidden; }
+.ytwrap iframe { width: 100%; height: 100%; display: block; }
+.mom { display: flex; align-items: center; gap: 10px; border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; }
+.mom .mono { flex: 1; font-weight: 700; }
+.msg { font-size: 13px; color: var(--muted); min-height: 1.2em; }
 [hidden] { display: none !important; }
 </style>
 </head>
@@ -108,6 +120,47 @@ details pre { white-space: pre-wrap; word-break: break-word; max-height: 160px; 
     <h1>Klipku</h1>
     <p class="sub">Potong video panjang jadi klip vertikal 9:16. Semua diproses di HP kamu, videonya tidak diunggah ke mana pun.</p>
   </header>
+
+  <details class="card" id="s-yt">
+    <summary>Pilih momen dari link YouTube <small>(opsional)</small></summary>
+    <div class="body">
+      <div class="row">
+        <input type="url" id="ytUrl" class="grow" placeholder="Tempel link YouTube" inputmode="url" autocomplete="off" aria-label="Link YouTube">
+        <button class="primary" id="ytLoad">Muat</button>
+      </div>
+      <p class="hint">Video diputar lewat pemutar resmi YouTube. Klipku tidak mengunduh apa pun dari YouTube, jadi untuk memotongnya kamu tetap butuh file videonya di HP. Fitur ini hanya untuk menandai momen dan menghasilkan daftar waktu.</p>
+      <div id="ytBox" class="body" hidden>
+        <div class="ytwrap"><div id="ytPlayer"></div></div>
+        <div class="row">
+          <span class="mono">Posisi <b id="ytNow">0:00</b></span>
+          <button class="small" data-seek="-10">−10 dtk</button>
+          <button class="small" data-seek="-5">−5 dtk</button>
+          <button class="small" data-seek="5">+5 dtk</button>
+          <button class="small" data-seek="10">+10 dtk</button>
+        </div>
+        <div class="row">
+          <button class="grow" id="ytStart">Mulai di sini</button>
+          <button class="grow primary" id="ytEnd">Akhir di sini</button>
+        </div>
+        <div id="ytList" class="body"></div>
+        <div class="row" id="ytActions" hidden>
+          <button class="small grow" id="ytCopy">Salin daftar waktu</button>
+          <button class="small grow primary" id="ytUse">Pakai sebagai klip</button>
+        </div>
+      </div>
+      <p class="msg" id="ytMsg" aria-live="polite"></p>
+    </div>
+  </details>
+
+  <details class="card" id="s-paste">
+    <summary>Tempel waktu klip <small>(opsional)</small></summary>
+    <div class="body">
+      <textarea id="pasteArea" spellcheck="false" placeholder="12:30-13:05&#10;1:02:10 - 1:02:45"></textarea>
+      <p class="hint">Satu klip per baris, format menit:detik atau jam:menit:detik. Daftar ini bisa dari kamu, dari AI, atau dari hasil tandai momen di atas. Klip masuk ke bagian "Atur klip".</p>
+      <button class="primary" id="pasteBtn">Tambah ke daftar klip</button>
+      <p class="msg" id="pasteMsg" aria-live="polite"></p>
+    </div>
+  </details>
 
   <section class="card" id="s-pick">
     <h2>1. Pilih video</h2>
@@ -408,12 +461,17 @@ $('#file').addEventListener('click', (ev) => { ev.target.value = ''; }); // agar
 $('#file').addEventListener('change', async (ev) => {
   const f = ev.target.files && ev.target.files[0];
   if (!f) return;
-  const same = !!state.file && state.file.name === f.name && state.file.size === f.size;
+  const hadFile = !!state.file;
+  const same = hadFile && state.file.name === f.name && state.file.size === f.size;
   state.file = f;
   const ext = (f.name.match(/\.[a-z0-9]{2,4}$/i) || ['.mp4'])[0].toLowerCase();
   state.ext = ext;
   state.inputFile = new File([f], 'input' + ext, { type: f.type });
-  if (!same) { state.duration = 0; state.levels = null; state.levelsOffset = 0; state.clips = []; state.nextId = 1; }
+  if (!same) {
+    state.duration = 0; state.levels = null; state.levelsOffset = 0;
+    // klip dari daftar waktu yang dipilih sebelum ada video tetap dipertahankan; ganti video lain mengosongkan daftar
+    if (hadFile) { state.clips = []; state.nextId = 1; }
+  }
   mounted = false; // file baru wajib di-mount ulang
   const p = $('#player');
   if (p.dataset.url) URL.revokeObjectURL(p.dataset.url);
@@ -471,7 +529,15 @@ function explain(e) {
 }
 $('#player').addEventListener('loadedmetadata', () => {
   const d = $('#player').duration;
-  if (isFinite(d) && d > 0) { state.duration = d; renderClips(); drawWave(); }
+  if (isFinite(d) && d > 0) {
+    state.duration = d;
+    // klip yang waktunya melewati durasi video dipotong atau dibuang
+    const before = state.clips.length;
+    state.clips = state.clips.filter((c) => c.start <= d - 3).map((c) => { if (c.end > d) c.end = d; return c; });
+    const dropped = before - state.clips.length;
+    if (dropped > 0) $('#fileInfo').textContent += ' · ' + dropped + ' klip dihapus karena waktunya melewati durasi video';
+    renderClips(); drawWave();
+  }
 });
 $('#player').addEventListener('error', () => {
   $('#fileInfo').textContent += ' · Browser tidak bisa memutar video ini, tapi analisis dan ekspor tetap bisa dicoba.';
@@ -769,6 +835,7 @@ function buildArgs(c, outName) {
 async function exportAll() {
   const sel = state.clips.filter((c) => c.on);
   if (!sel.length || state.busy) return;
+  if (!state.file) { showError('Pilih video dari HP dulu. Daftar waktu klipnya sudah siap, tinggal dipotong dari file videonya.'); return; }
   state.cancelled = false; logLines.length = 0;
   await setBusy(true);
   try {
@@ -820,6 +887,136 @@ function addResult(blob, c) {
   }
   $('#outList').prepend(el); $('#s-out').hidden = false;
 }
+
+/* ---------- tempel waktu klip ---------- */
+const RANGE_RE = /(\d{1,3}(?::\d{1,2}){1,2})\s*(?:-|–|—|->|→|sampai|s\/d|to)\s*(\d{1,3}(?::\d{1,2}){1,2})/i;
+function parseRanges(text) {
+  const ranges = [], skipped = [];
+  for (const raw of String(text).split(/\r?\n/)) {
+    const line = raw.trim(); if (!line) continue;
+    const m = RANGE_RE.exec(line);
+    const a = m ? parseTime(m[1]) : NaN, b = m ? parseTime(m[2]) : NaN;
+    if (!(a >= 0) || !(b >= 0) || b - a < 3) { skipped.push(line); continue; }
+    ranges.push({ start: a, end: b });
+  }
+  return { ranges, skipped };
+}
+function addRanges(ranges) {
+  const D = state.duration || 0; let added = 0, outside = 0, dup = 0;
+  for (const r of ranges) {
+    if (D && r.start > D - 3) { outside++; continue; }
+    const end = D ? Math.min(r.end, D) : r.end;
+    if (state.clips.some((c) => c.start === r.start && c.end === end)) { dup++; continue; }
+    state.clips.push(mkClip(r.start, end, 1, true)); added++;
+  }
+  state.clips.sort((a, b) => a.start - b.start);
+  renderClips(); drawWave();
+  return { added, outside, dup };
+}
+function rangesMessage(r, skipped) {
+  let t = r.added + ' klip ditambahkan ke daftar klip.';
+  if (r.dup) t += ' ' + r.dup + ' sudah ada.';
+  if (r.outside) t += ' ' + r.outside + ' dilewati karena di luar durasi video.';
+  if (skipped) t += ' ' + skipped + ' baris tidak terbaca.';
+  if (r.added && !state.file) t += ' Pilih video dari HP supaya bisa dipotong.';
+  return t;
+}
+$('#pasteBtn').addEventListener('click', () => {
+  const { ranges, skipped } = parseRanges($('#pasteArea').value);
+  const msg = $('#pasteMsg');
+  if (!ranges.length) { msg.textContent = 'Tidak ada waktu yang terbaca. Tulis satu klip per baris, contoh 12:30-13:05. Klip minimal 3 detik.'; return; }
+  const r = addRanges(ranges);
+  msg.textContent = rangesMessage(r, skipped.length);
+  if (!skipped.length) $('#pasteArea').value = '';
+  if (r.added) $('#s-clips').scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+
+/* ---------- pilih momen dari YouTube (pemutar resmi, tanpa unduh) ---------- */
+const yt = { player: null, apiP: null, id: null, pending: null, moments: [], timer: null };
+function ytId(input) {
+  const s = String(input).trim(); let u;
+  try { u = new URL(/^https?:\/\//i.test(s) ? s : 'https://' + s); } catch (e) { return null; }
+  const host = u.hostname.replace(/^(www|m)\./, '');
+  let id = null;
+  if (host === 'youtu.be') id = u.pathname.slice(1).split('/')[0];
+  else if (host === 'youtube.com' || host === 'music.youtube.com') {
+    if (u.pathname === '/watch') id = u.searchParams.get('v');
+    else { const m = /^\/(?:shorts|embed|live|v)\/([^/?#]+)/.exec(u.pathname); if (m) id = m[1]; }
+  }
+  return id && /^[A-Za-z0-9_-]{11}$/.test(id) ? id : null;
+}
+function ytApi() {
+  if (window.YT && window.YT.Player) return Promise.resolve();
+  if (yt.apiP) return yt.apiP;
+  yt.apiP = new Promise((res, rej) => {
+    const prev = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => { if (prev) prev(); res(); };
+    loadScript('https://www.youtube.com/iframe_api').catch(() => { yt.apiP = null; rej(new Error('Gagal memuat pemutar YouTube. Cek koneksi internet lalu coba lagi.')); });
+  });
+  return yt.apiP;
+}
+function ytT() { try { return yt.player && yt.player.getCurrentTime ? yt.player.getCurrentTime() : 0; } catch (e) { return 0; } }
+function ytError(ev) {
+  const c = ev && ev.data;
+  const t = c === 100 ? 'Video tidak ditemukan atau berstatus privat.'
+    : (c === 101 || c === 150) ? 'Pemilik video tidak mengizinkan diputar di luar YouTube.'
+    : c === 153 ? 'Pemutar YouTube menolak dibuka dari halaman ini. Buka Klipku lewat alamat https (bukan file langsung di HP).'
+    : 'Video ini tidak bisa diputar di sini (kode ' + c + ').';
+  $('#ytMsg').textContent = t;
+}
+async function ytLoad() {
+  const id = ytId($('#ytUrl').value), msg = $('#ytMsg');
+  if (!id) { msg.textContent = 'Link YouTube tidak terbaca. Contoh: https://www.youtube.com/watch?v=xxxxxxxxxxx'; return; }
+  msg.textContent = 'Memuat pemutar YouTube…';
+  try { await ytApi(); } catch (e) { msg.textContent = e.message; return; }
+  $('#ytBox').hidden = false;
+  if (yt.id !== id) { yt.moments = []; yt.pending = null; renderMoments(); }
+  if (yt.player && typeof yt.player.loadVideoById === 'function') yt.player.loadVideoById(id);
+  else if (!yt.player) {
+    const opts = { playsinline: 1, rel: 0 };
+    if (/^https?:$/.test(location.protocol)) opts.origin = location.origin;
+    yt.player = new window.YT.Player('ytPlayer', { videoId: id, playerVars: opts, events: { onReady: () => { msg.textContent = 'Putar videonya, lalu tandai awal dan akhir tiap momen.'; }, onError: ytError } });
+  }
+  yt.id = id;
+  if (!yt.timer) yt.timer = setInterval(() => { $('#ytNow').textContent = fmt(ytT()); }, 500);
+  msg.textContent = 'Putar videonya, lalu tandai awal dan akhir tiap momen.';
+}
+function renderMoments() {
+  $('#ytList').innerHTML = yt.moments.map((m, i) => `<div class="mom"><span class="mono">${fmt(m.start)} – ${fmt(m.end)}</span><span class="hint">${fmt(m.end - m.start)}</span><button class="small" data-del="${i}" aria-label="Hapus momen ${i + 1}">Hapus</button></div>`).join('');
+  $('#ytActions').hidden = yt.moments.length === 0;
+}
+$('#ytLoad').addEventListener('click', ytLoad);
+$('#ytUrl').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') ytLoad(); });
+$('#ytBox').addEventListener('click', (ev) => {
+  const sk = ev.target.closest('[data-seek]');
+  if (sk && yt.player && yt.player.seekTo) { yt.player.seekTo(Math.max(0, ytT() + parseInt(sk.dataset.seek, 10)), true); return; }
+  const del = ev.target.closest('[data-del]');
+  if (del) { yt.moments.splice(parseInt(del.dataset.del, 10), 1); renderMoments(); }
+});
+$('#ytStart').addEventListener('click', () => {
+  yt.pending = Math.floor(ytT());
+  $('#ytMsg').textContent = 'Mulai ditandai di ' + fmt(yt.pending) + '. Putar sampai akhir momen, lalu tekan "Akhir di sini".';
+});
+$('#ytEnd').addEventListener('click', () => {
+  const msg = $('#ytMsg');
+  if (yt.pending == null) { msg.textContent = 'Tekan "Mulai di sini" dulu.'; return; }
+  const e = Math.round(ytT());
+  if (e - yt.pending < 3) { msg.textContent = 'Momen minimal 3 detik. Putar sedikit lebih jauh, lalu tekan "Akhir di sini" lagi.'; return; }
+  yt.moments.push({ start: yt.pending, end: e });
+  yt.moments.sort((a, b) => a.start - b.start);
+  msg.textContent = 'Momen ' + fmt(yt.pending) + ' – ' + fmt(e) + ' ditambahkan.';
+  yt.pending = null; renderMoments();
+});
+$('#ytCopy').addEventListener('click', async () => {
+  const text = yt.moments.map((m) => fmt(m.start) + '-' + fmt(m.end)).join('\n');
+  try { await navigator.clipboard.writeText(text); $('#ytMsg').textContent = 'Daftar waktu disalin.'; }
+  catch (e) { $('#pasteArea').value = text; $('#s-paste').open = true; $('#ytMsg').textContent = 'Tidak bisa menyalin otomatis. Daftar waktunya ditaruh di kotak "Tempel waktu klip" di bawah, salin dari sana.'; }
+});
+$('#ytUse').addEventListener('click', () => {
+  const r = addRanges(yt.moments.map((m) => ({ start: m.start, end: m.end })));
+  $('#ytMsg').textContent = rangesMessage(r, 0);
+  if (r.added) $('#s-clips').scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
 
 /* ---------- wiring ---------- */
 $('#analyzeBtn').addEventListener('click', analyze);
